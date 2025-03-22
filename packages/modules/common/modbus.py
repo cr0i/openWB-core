@@ -31,7 +31,6 @@ class ModbusDataType(Enum):
     FLOAT_16 = 16, "decode_16bit_float"
     FLOAT_32 = 32, "decode_32bit_float"
     FLOAT_64 = 64, "decode_64bit_float"
-    STRING_16 = 16, "decode_string"
 
     def __init__(self, bits: int, decoding_method: str):
         self.bits = bits

@@ -36,7 +36,6 @@ class SolaredgeBat(AbstractBat):
         "StorageChargeDischargeDefaultMode": (0xe00a, ModbusDataType.UINT_16,),
         "RemoteControlCommandMode": (0xe00d, ModbusDataType.UINT_16,),
         "RemoteControlCommandDischargeLimit": (0xe010, ModbusDataType.FLOAT_32,),
-        "Firmware": (40044, ModbusDataType.STRING_16,),
     }
 
     def __init__(self,
@@ -80,12 +79,6 @@ class SolaredgeBat(AbstractBat):
         return bat_state
 
     def set_power_limit(self, power_limit: Optional[int]) -> None:
-        registers_to_read = [
-            "Firmware",
-        ]
-        values = self._read_registers(registers_to_read, unit)
-        self.inverter_firmware = values["Firmware"]
-        log.debug(f"Firmware: {self.inverter_firmware}")
         """
         Die Steuerung bei SolarEdge basiert auf folgenden Einstellungen:
         Zunaechst muss der Storage Control Mode gesetzt werden:
@@ -203,7 +196,6 @@ class SolaredgeBat(AbstractBat):
             ModbusDataType.UINT_16: builder.add_16bit_uint,
             ModbusDataType.INT_16: builder.add_16bit_int,
             ModbusDataType.FLOAT_32: builder.add_32bit_float,
-            ModbusDataType.STRING_16: builder.add_string,
         }
 
         if data_type in encode_methods:
