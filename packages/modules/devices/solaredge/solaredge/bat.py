@@ -25,12 +25,8 @@ FLOAT32_UNSUPPORTED = -0xffffff00000000000000000000000000
 class SolaredgeBat(AbstractBat):
     # Define all possible registers with their data types
     REGISTERS = {
-        "Battery1StateOfEnergy": (0xe184, ModbusDataType.FLOAT_32,),  # Mirror: 0xf584
-        "Battery1InstantaneousPower": (0xe174, ModbusDataType.FLOAT_32,),  # Mirror: 0xf574
-        "Battery1Status": (0xe186, ModbusDataType.UINT_32,),
-        "Battery2StateOfEnergy": (0xe284, ModbusDataType.FLOAT_32,),
-        "Battery2InstantaneousPower": (0xe274, ModbusDataType.FLOAT_32,),
-        "Battery2Status": (0xe286, ModbusDataType.UINT_32,),
+        "Battery1StateOfEnergy": (0xf584, ModbusDataType.FLOAT_32,),  # Dezimal 62852
+        "Battery1InstantaneousPower": (0xf574, ModbusDataType.FLOAT_32,),  # Dezimal 62836
         "StorageControlMode": (0xe004, ModbusDataType.UINT_16,),
         "StorageChargeDischargeDefaultMode": (0xe00a, ModbusDataType.UINT_16,),
         "RemoteControlCommandMode": (0xe00d, ModbusDataType.UINT_16,),
@@ -47,8 +43,8 @@ class SolaredgeBat(AbstractBat):
         self.sim_counter = SimCounter(self.__device_id, self.component_config.id, prefix="speicher")
         self.store = get_bat_value_store(self.component_config.id)
         self.fault_state = FaultState(ComponentInfo.from_component_config(self.component_config))
-        self.battery_index = 1  # Nach Umsetzung des PR 2236, hier entfernen und unten als battery_index ersetzen.
-        self.soc_reserve = 10  # SoC-Grenze bis zu der der Speicher entladen wird. In Config aufnehmen.
+        self.last_mode = 'undefined'
+        self._cached_firmware: Optional[str] = None
 
     def update(self) -> None:
         self.store.set(self.read_state())
@@ -57,20 +53,19 @@ class SolaredgeBat(AbstractBat):
         unit = self.component_config.configuration.modbus_id
 
         registers_to_read = [
-            f"Battery{self.battery_index}InstantaneousPower",
-            f"Battery{self.battery_index}StateOfEnergy",
+            "Battery1InstantaneousPower",
+            "Battery1StateOfEnergy",
         ]
         values = self._read_registers(registers_to_read, unit)
-        power = values[f"Battery{self.battery_index}InstantaneousPower"]
-        soc = values[f"Battery{self.battery_index}StateOfEnergy"]
-        if power == FLOAT32_UNSUPPORTED:
-            power = 0
 
-        imported, exported = self.sim_counter.sim_count(power)
+        if values["Battery1InstantaneousPower"] == FLOAT32_UNSUPPORTED:
+            values["Battery1InstantaneousPower"] = 0
+
+        imported, exported = self.sim_counter.sim_count(values["Battery1InstantaneousPower"])
 
         bat_state = BatState(
-            power=power,
-            soc=soc,
+            power=values["Battery1InstantaneousPower"],
+            soc=values["Battery1StateOfEnergy"],
             imported=imported,
             exported=exported
         )
@@ -82,94 +77,45 @@ class SolaredgeBat(AbstractBat):
         PowerLimitMode = data.data.bat_all_data.data.config.power_limit_mode
 
         if PowerLimitMode == 'no_limit':
-            """"
-            Keine Speichersteuerung, andere Steuerungen zulassen (SolarEdge One, ioBroker, Node-Red etc.).
-            Falls externe Steuerungen aktiv sind, sollten diese nicht beeinfusst werden.
-            Daher erfolgt im Modus "Immer" der Speichersteuerung gar keine Steuerung.
-            """
             return
 
-        """
-        Die Steuerung bei SolarEdge basiert auf folgenden Einstellungen:
-        Zunaechst muss der Storage Control Mode gesetzt werden:
-        1 - Maximize Self Consumption FW < 4.20.36
-        2 - Time of Use (Steuerung durch SolarEdge Profile) FW >= 4.20.36
-        4 - Remote Control (Fuer Steuerung durch openWB)
-        Dann der Remote Control Command Mode und Default Mode:
-        7 - Maximize self-consumption
-        anschliessend das DischargLimit setzen.
-
-        todo: Firmware Version aus Register 40044 als String(16) auslesen und gegen Version 4.20.36 pruefen.
-        """
         if power_limit is None:
-            # Keine Ladung mit Speichersteuerung.
-            registers_to_read = [
-                "StorageControlMode",
-            ]
-            values = self._read_registers(registers_to_read, unit)
-            if values["StorageControlMode"] == 4:
-                # Steuerung deaktivieren.
+            if self.last_mode is not None:
                 log.debug("Keine Speichersteuerung gefordert, Steuerung deaktivieren.")
+                firmware = self._read_firmware_version(unit)
+                log.info(f"SolarEdge Firmware-Version (Unit {unit}): {firmware}")
+
+                # Default Mode: Time of Use (2), bei alter Firmware: Max. Eigenverbrauch (7)
+                if firmware and self._firmware_older_than(firmware, "4.20.36"):
+                    control_mode = 7
+                    log.info("Firmware < 4.20.36 erkannt – setze StorageControlMode = 7 (Max. Eigenverbrauch)")
+                else:
+                    control_mode = 2
+
                 values_to_write = {
                     "RemoteControlCommandDischargeLimit": 5000,
                     "StorageChargeDischargeDefaultMode": 0,
                     "RemoteControlCommandMode": 0,
-                    "StorageControlMode": 2,
+                    "StorageControlMode": control_mode,
                 }
                 self._write_registers(values_to_write, unit)
+                self.last_mode = None
             else:
-                # Steuerung bereits inaktiv.
                 return
 
-        elif power_limit >= 0:
-            """
-            Ladung mit Speichersteuerung.
-            SolarEdge entlaedt den Speicher immer nur bis zur SoC-Reserve.
-            Steuerung beenden, wenn der SoC vom Speicher die SoC-Reserve unterschreitet.
-            """
-            registers_to_read = [
-                f"Battery{self.battery_index}StateOfEnergy",
-                "StorageControlMode",
-                "RemoteControlCommandDischargeLimit",
-            ]
-            values = self._read_registers(registers_to_read, unit)
-            soc = int(values[f"Battery{self.battery_index}StateOfEnergy"])
-            discharge_limit = int(values["RemoteControlCommandDischargeLimit"])
-
-            if values["StorageControlMode"] == 4:  # Speichersteuerung aktiv.
-                if self.soc_reserve > soc:
-                    # Speichersteuerung deaktivieren, SoC-Reserve unterschritten.
-                    log.debug("Speichersteuerung deaktivieren. SoC-Reserve unterschritten.")
-                    values_to_write = {
-                        "RemoteControlCommandDischargeLimit": 5000,
-                        "StorageChargeDischargeDefaultMode": 0,
-                        "RemoteControlCommandMode": 0,
-                        "StorageControlMode": 2,
-                    }
-                    self._write_registers(values_to_write, unit)
-                elif discharge_limit not in range(int(power_limit)-10, int(power_limit)+10):
-                    # DischargeLimit nur setzen, bei Abweichung von mehr als 10W.
-                    log.debug(f"Speichersteuerung aktiv, Discharge-Limit {int(power_limit)}W.")
-                    values_to_write = {
-                        "RemoteControlCommandDischargeLimit": int(min(power_limit, 5000))
-                    }
-                    self._write_registers(values_to_write, unit)
-            else:  # Speichersteuerung inaktiv.
-                if self.soc_reserve < soc:
-                    # Speichersteuerung nur aktivieren, wenn SoC ueber SoC-Reserve.
-                    log.debug(f"Speichersteuerung aktivieren. Discharge-Limit: {int(power_limit)} W.")
-                    values_to_write = {
-                        "StorageControlMode": 4,
-                        "StorageChargeDischargeDefaultMode": 7,
-                        "RemoteControlCommandMode": 7,
-                        "RemoteControlCommandDischargeLimit": int(min(power_limit, 5000))
-                    }
-                    self._write_registers(values_to_write, unit)
+        elif power_limit >= 0 and self.last_mode != 'stop':
+            log.debug("Speichersteuerung aktivieren. Speicher-Entladung sperren.")
+            values_to_write = {
+                "StorageControlMode": 4,
+                "StorageChargeDischargeDefaultMode": 1,
+                "RemoteControlCommandMode": 1,
+            }
+            self._write_registers(values_to_write, unit)
+            self.last_mode = 'stop'
 
     def _read_registers(self, register_names: list, unit: int) -> Dict[str, Union[int, float]]:
         values = {}
         for key in register_names:
-            log.debug(f"Bat raw values {self.__tcp_client.address}: {values}")
             address, data_type = self.REGISTERS[key]
             values[key] = self.__tcp_client.read_holding_registers(
                 address, data_type, wordorder=Endian.Little, unit=unit
@@ -197,12 +143,42 @@ class SolaredgeBat(AbstractBat):
             ModbusDataType.FLOAT_32: builder.add_32bit_float,
         }
 
-        if data_type in encode_methods:
-            encode_methods[data_type](int(value))
+        if data_type == ModbusDataType.FLOAT_32:
+            encode_methods[data_type](float(value))
         else:
-            raise ValueError(f"Unsupported data type: {data_type}")
+            encode_methods[data_type](int(value))
 
         return builder.to_registers()
+
+    def _read_firmware_version(self, unit: int) -> Optional[str]:
+        try:
+            address = 40044  # 40044 - 40001 = 43
+            length = 8
+            result = self.__tcp_client.client.read_holding_registers(address=address, count=length, unit=unit)
+            if result.isError():
+                log.warning(f"Fehler beim Lesen der Firmware-Version von Unit {unit}")
+                return None
+
+            from pymodbus.payload import BinaryPayloadDecoder
+            decoder = BinaryPayloadDecoder.fromRegisters(
+                result.registers, byteorder=Endian.Big, wordorder=Endian.Big
+            )
+            firmware = decoder.decode_string(length * 2).decode('ascii').strip('\x00')
+            self._cached_firmware = firmware
+            return firmware
+        except Exception as e:
+            log.warning(f"Fehler beim Lesen der Firmware: {e}")
+            return None
+
+    @staticmethod
+    def _firmware_older_than(current: str, compare_to: str) -> bool:
+        try:
+            def to_tuple(version_str):
+                return tuple(map(int, version_str.strip().split(".")))
+            return to_tuple(current) < to_tuple(compare_to)
+        except Exception as e:
+            log.warning(f"Fehler beim Vergleichen der Firmware-Versionen: {e}")
+            return False
 
 
 component_descriptor = ComponentDescriptor(configuration_factory=SolaredgeBatSetup)
