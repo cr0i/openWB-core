@@ -188,9 +188,25 @@ class ModbusClient:
     def write_registers(self, address: int, value: Any, **kwargs):
         self._delegate.write_registers(address, value, **kwargs)
 
-    def write_single_coil(self, address: int, value: Any, **kwargs):
-        self._delegate.write_coil(address, value, **kwargs)
+    def read_string(self, address: int, length: int, unit: int,
+                    byteorder: Endian = Endian.Big,
+                    wordorder: Endian = Endian.Big) -> Optional[str]:
+        """
+        Liest einen ASCII-String aus `length` Registern (2 Bytes pro Register) und dekodiert ihn.
+        """
+        if not self.is_socket_open():
+            self.connect()
+        try:
+            response = self._delegate.read_holding_registers(address=address, count=length, unit=unit)
+            if response.isError():
+                raise Exception(f"Modbus-Fehler beim Lesen eines Strings von Adresse {address}")
 
+            decoder = BinaryPayloadDecoder.fromRegisters(response.registers, byteorder, wordorder)
+            raw_string = decoder.decode_string(length * 2)  # 2 Bytes pro Register
+            return raw_string.decode('ascii').strip('\x00')
+        except Exception as e:
+            log.warning(f"Fehler beim Lesen eines Strings von Adresse {address}: {e}")
+            return None
 
 class ModbusTcpClient_(ModbusClient):
     def __init__(self,
