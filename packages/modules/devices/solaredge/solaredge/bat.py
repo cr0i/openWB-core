@@ -27,15 +27,16 @@ class SolaredgeBat(AbstractBat):
     REGISTERS = {
         "Battery1StateOfEnergy": (0xe184, ModbusDataType.FLOAT_32,),  # Mirror: 0xf584
         "Battery1InstantaneousPower": (0xe174, ModbusDataType.FLOAT_32,),  # Mirror: 0xf574
-        "Battery1Status": (0xe186, ModbusDataType.UINT_32,),
         "Battery2StateOfEnergy": (0xe284, ModbusDataType.FLOAT_32,),
         "Battery2InstantaneousPower": (0xe274, ModbusDataType.FLOAT_32,),
-        "Battery2Status": (0xe286, ModbusDataType.UINT_32,),
         "StorageControlMode": (0xe004, ModbusDataType.UINT_16,),
+        "StorageBackupReserved": (0xe008, ModbusDataType.FLOAT_32,),
         "StorageChargeDischargeDefaultMode": (0xe00a, ModbusDataType.UINT_16,),
         "RemoteControlCommandMode": (0xe00d, ModbusDataType.UINT_16,),
         "RemoteControlCommandDischargeLimit": (0xe010, ModbusDataType.FLOAT_32,),
     }
+    REGISTER_Battery1ManufacturerName = 0xe100
+    REGISTER_Battery2ManufacturerName = 0xe200
 
     def __init__(self,
                  device_id: int,
@@ -47,7 +48,7 @@ class SolaredgeBat(AbstractBat):
         self.sim_counter = SimCounter(self.__device_id, self.component_config.id, prefix="speicher")
         self.store = get_bat_value_store(self.component_config.id)
         self.fault_state = FaultState(ComponentInfo.from_component_config(self.component_config))
-        #self.battery_index = 1  # Nach Umsetzung des PR 2236, hier entfernen und unten als battery_index ersetzen.
+        self.battery_index = 1  # Nach Umsetzung des PR 2236, hier entfernen und unten als battery_index ersetzen.
         #self.soc_reserve = 10  # SoC-Grenze bis zu der der Speicher entladen wird. In Config aufnehmen.
 
     def update(self) -> None:
@@ -89,6 +90,11 @@ class SolaredgeBat(AbstractBat):
             """
             return
 
+        if self.firmware is None:
+            self.firmware = self._read_firmware(unit)
+        if self.soc_reserve is None:
+            self.soc_reserve = self._read_soc_reserve(unit)
+
         """
         Die Steuerung bei SolarEdge basiert auf folgenden Einstellungen:
         Zunaechst muss der Storage Control Mode gesetzt werden:
@@ -110,7 +116,7 @@ class SolaredgeBat(AbstractBat):
             if values["StorageControlMode"] == 4:
                 # Steuerung deaktivieren.
                 log.debug("Keine Speichersteuerung gefordert, Steuerung deaktivieren.")
-                firmware = self._read_firmware_version(unit)
+                firmware = self._read_firmware(unit)
                 if firmware >= '0004.0020.0036':
                     StorageControlMode_Off = 2
                 else:
@@ -141,11 +147,16 @@ class SolaredgeBat(AbstractBat):
             soc = int(values[f"Battery{self.battery_index}StateOfEnergy"])
             discharge_limit = int(values["RemoteControlCommandDischargeLimit"])
 
+            if self.firmware is None:
+                self.firmware = self._read_firmware(unit)
+            if self.soc_reserve is None:
+                self.soc_reserve = self._read_soc_reserve(unit)
+
             if values["StorageControlMode"] == 4:  # Speichersteuerung aktiv.
                 if self.soc_reserve > soc:
                     # Speichersteuerung deaktivieren, SoC-Reserve unterschritten.
                     log.debug("Speichersteuerung deaktivieren. SoC-Reserve unterschritten.")
-                    firmware = self._read_firmware_version(unit)
+                    firmware = self._read_firmware(unit)
                     if firmware >= '0004.0020.0036':
                         StorageControlMode_Off = 2
                     else:
@@ -215,9 +226,9 @@ class SolaredgeBat(AbstractBat):
 
         return builder.to_registers()
 
-    def _read_firmware_version(self, unit: int) -> Optional[str]:
-        address = 40044  # 40044 - 40001 = 43
-        length = 8    # 8 Register = 16 Zeichen (ASCII)
+    def _read_firmware(self, unit: int) -> Optional[str]:
+        address = 40044  # SolarEdge Firmware (Sunspec C_Version)
+        length = 8  # 8 Register = 16 Zeichen (ASCII)
 
         firmware = self.__tcp_client.read_string(address=address, length=length, unit=unit)
         if firmware:
@@ -225,6 +236,31 @@ class SolaredgeBat(AbstractBat):
         else:
             log.warning(f"Fehler beim Lesen der Firmware-Version von Unit {unit}")
         return firmware
+
+    def _read_soc_reserve(self, unit: int) -> Optional[str]:
+
+        address = f"REGISTER_Battery{self.battery_index}ManufacturerName"
+        length = 16    # 16 Register = 32 Zeichen (ASCII)
+        battery_manufacturer = self.__tcp_client.read_string(address=address, length=length, unit=unit)
+        if battery_manufacturer:
+            log.info(f"Batterie-Hersteller gelesen: {battery_manufacturer}")
+        else:
+            log.warning(f"Fehler beim Lesen des Batterie-Herstellers von Unit {unit}")
+
+        if battery_manufacturer = '48V_BYD':
+            soc_reserve = 10
+        elif battery_manufacturer = 'LG':
+            soc_reserve = 5
+        else soc_reserve = 0
+
+        registers_to_read = [
+            "StorageBackupReserved",
+        ]
+        values = self._read_registers(registers_to_read, unit)
+        soc_reserve = int(max(int(soc_reserve), int(values["StorageBackupReserved"])))
+        log.info(f"SoC-Reserve ermittelt: {soc_reserve}")
+
+        return soc_reserve
 
 
 component_descriptor = ComponentDescriptor(configuration_factory=SolaredgeBatSetup)
