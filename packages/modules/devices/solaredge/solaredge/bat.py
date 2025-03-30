@@ -247,11 +247,12 @@ class SolaredgeBat(AbstractBat):
         else:
             log.warning(f"Fehler beim Lesen des Batterie-Herstellers von Unit {unit}")
 
-        if battery_manufacturer = '48V_BYD':
+        if battery_manufacturer == '48V_BYD':
             soc_reserve = 10
-        elif battery_manufacturer = 'LG':
+        elif battery_manufacturer == 'LG':
             soc_reserve = 5
-        else soc_reserve = 0
+        else:
+            soc_reserve = 0
 
         registers_to_read = [
             "StorageBackupReserved",
