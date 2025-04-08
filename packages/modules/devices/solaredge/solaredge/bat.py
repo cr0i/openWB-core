@@ -48,9 +48,8 @@ class SolaredgeBat(AbstractBat):
         self.store = get_bat_value_store(self.component_config.id)
         self.fault_state = FaultState(ComponentInfo.from_component_config(self.component_config))
         self.battery_index = 1  # Nach Umsetzung des PR 2236, hier entfernen und unten als battery_index ersetzen.
-        self.soc_reserve = None
+        self.soc_reserve = 10  # Umsetzung als Config Option nötig. Kann je nach  Speicher abweichen.
         self.firmware = None
-        self.REGISTER_BatteryManufacturerName = [0xe100, 0xe200]
 
     def update(self) -> None:
         self.store.set(self.read_state())
@@ -87,7 +86,7 @@ class SolaredgeBat(AbstractBat):
             """"
             Keine Speichersteuerung, andere Steuerungen zulassen (SolarEdge One, ioBroker, Node-Red etc.).
             Falls externe Steuerungen aktiv sind, sollten diese nicht beeinfusst werden.
-            Daher erfolgt im Modus "Immer" der Speichersteuerung gar keine Steuerung.
+            Daher erfolgt im Modus "Immer" der Speichersteuerung keine Steuerung.
             """
             return
 
@@ -159,14 +158,14 @@ class SolaredgeBat(AbstractBat):
                     log.debug("Speichersteuerung deaktivieren. SoC-Reserve unterschritten.")
                     self.firmware = self._read_firmware(unit)
                     if self.firmware >= '0004.0020.0036':
-                        StorageControlMode_Off = 2
+                        StorageControlModeDefault = 2
                     else:
-                        StorageControlMode_Off = 1
+                        StorageControlModeDefault = 1
                     values_to_write = {
                         "RemoteControlCommandDischargeLimit": 5000,
                         "StorageChargeDischargeDefaultMode": 0,
                         "RemoteControlCommandMode": 0,
-                        "StorageControlMode": StorageControlMode_Off,
+                        "StorageControlMode": StorageControlModeDefault,
                     }
                     self._write_registers(values_to_write, unit)
 
@@ -239,29 +238,12 @@ class SolaredgeBat(AbstractBat):
         return self.firmware
 
     def _read_soc_reserve(self, unit: int) -> Optional[str]:
-
-        address = self.REGISTER_BatteryManufacturerName[self.battery_index-1]
-        length = 16    # 16 Register = 32 Zeichen (ASCII)
-        battery_manufacturer = self.__tcp_client.read_string(address=address, length=length, unit=unit)
-        if battery_manufacturer:
-            log.info(f"Batterie-Hersteller gelesen: {battery_manufacturer}")
-        else:
-            log.warning(f"Fehler beim Lesen des Batterie-Herstellers von Unit {unit}")
-
-        if battery_manufacturer == '48V_BYD':
-            soc_reserve = 10
-        elif battery_manufacturer == 'LG':
-            soc_reserve = 5
-        else:
-            soc_reserve = 0
-
         registers_to_read = [
             "StorageBackupReserved",
         ]
         values = self._read_registers(registers_to_read, unit)
         soc_reserve = int(max(int(soc_reserve), int(values["StorageBackupReserved"])))
         log.info(f"SoC-Reserve ermittelt: {soc_reserve}")
-
         return soc_reserve
 
 
