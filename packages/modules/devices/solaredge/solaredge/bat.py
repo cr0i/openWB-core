@@ -47,8 +47,8 @@ class SolaredgeBat(AbstractBat):
         self.sim_counter = SimCounter(self.__device_id, self.component_config.id, prefix="speicher")
         self.store = get_bat_value_store(self.component_config.id)
         self.fault_state = FaultState(ComponentInfo.from_component_config(self.component_config))
-        self.battery_index = 1  # Nach Umsetzung des PR 2236, hier entfernen und unten als battery_index ersetzen.
-        self.soc_reserve = 10  # Umsetzung als Config Option nötig. Kann je nach  Speicher abweichen.
+        self.battery_index = getattr(self.component_config.configuration, "battery_index", 1)
+        self.soc_reserve = getattr(self.component_config.configuration, "soc_reserve", 10)
         self.firmware = None
 
     def update(self) -> None:
