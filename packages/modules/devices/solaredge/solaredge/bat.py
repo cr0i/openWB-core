@@ -46,7 +46,9 @@ class SolaredgeBat(AbstractBat):
         "StorageControlMode": (0xe004, ModbusDataType.UINT_16,),
         "StorageBackupReserved": (0xe008, ModbusDataType.FLOAT_32,),
         "StorageChargeDischargeDefaultMode": (0xe00a, ModbusDataType.UINT_16,),
+        "RemoteControlCommandTimeout": (0xe00b, ModbusDataType.UINT_32,),
         "RemoteControlCommandMode": (0xe00d, ModbusDataType.UINT_16,),
+        "RemoteControlCommandChargeLimit": (0xe0e, ModbusDataType.FLOAT_32,),
         "RemoteControlCommandDischargeLimit": (0xe010, ModbusDataType.FLOAT_32,),
     }
 
