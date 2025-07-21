@@ -28,7 +28,10 @@ MAX_DISCHARGE_LIMIT = 5000
 DEFAULT_CONTROL_MODE = 1  # Control Mode Max Eigenverbrauch
 REMOTE_CONTROL_MODE = 4  # Control Mode Remotesteuerung
 DEFAULT_COMMAND_MODE = 0  # Command Mode ohne Steuerung
-ACTIVE_COMMAND_MODE = 7  # Command Mode Max Eigenverbrauch bei Steuerung
+MAXSELFCONSUM_COMMAND_MODE = 7  # Command Mode Max Eigenverbrauch bei Steuerung
+CHARGE_COMMAND_MODE = 3  # Command Mode Charge from PV + AC
+DISCHARGEMAXEXPORT_COMMAND_MODE = 4  # Command Mode Max Export bis MaxDischargeLimit
+DISCHARGELOADSCONSUM_COMMAND_MODE = 5  # Command Mode Entladung Verbrauch ohne Grid-Export
 
 
 class KwargsDict(TypedDict):
@@ -44,6 +47,7 @@ class SolaredgeBat(AbstractBat):
         "Battery2StateOfEnergy": (0xe284, ModbusDataType.FLOAT_32,),
         "Battery2InstantaneousPower": (0xe274, ModbusDataType.FLOAT_32,),
         "StorageControlMode": (0xe004, ModbusDataType.UINT_16,),
+        "StorageACChargePolicy": (0xe005, ModbusDataType.UINT_16,),
         "StorageBackupReserved": (0xe008, ModbusDataType.FLOAT_32,),
         "StorageChargeDischargeDefaultMode": (0xe00a, ModbusDataType.UINT_16,),
         "RemoteControlCommandTimeout": (0xe00b, ModbusDataType.UINT_32,),
@@ -156,7 +160,7 @@ class SolaredgeBat(AbstractBat):
             else:
                 return
 
-        elif abs(power_limit) >= 0:
+        elif power_limit <= 0:
             """
             Ladung mit Speichersteuerung.
             SolarEdge entlaedt den Speicher immer nur bis zur SoC-Reserve.
@@ -211,12 +215,16 @@ class SolaredgeBat(AbstractBat):
                     self.StorageControlMode_Read = values["StorageControlMode"]
                     values_to_write = {
                         "StorageControlMode": REMOTE_CONTROL_MODE,
-                        "StorageChargeDischargeDefaultMode": ACTIVE_COMMAND_MODE,
-                        "RemoteControlCommandMode": ACTIVE_COMMAND_MODE,
+                        "StorageChargeDischargeDefaultMode": MAXSELFCONSUM_COMMAND_MODE,
+                        "RemoteControlCommandMode": MAXSELFCONSUM_COMMAND_MODE,
                         "RemoteControlCommandDischargeLimit": int(min(abs(power_limit), MAX_DISCHARGE_LIMIT))
                     }
                     self._write_registers(values_to_write, unit)
                     self.last_mode = 'limited'
+        elif power_limit > 0
+            log.debug(f"Speicherladung Speicher{battery_index}: {int(abs(power_limit))}W.")
+            self.last_mode = 'charge'
+            return
 
     def _read_registers(self, register_names: list, unit: int) -> Dict[str, Union[int, float]]:
         values = {}
